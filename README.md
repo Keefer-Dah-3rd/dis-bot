@@ -14,8 +14,9 @@ A Discord bot for the Mibbit team that collects notes from anywhere in the serve
 | `/todos` | Lists open action items, all of them or one person's, and lets you mark them done. |
 | `/notes search`, `recent`, `tag` | Finds notes. Only you see the results. |
 | `/notes delete` | Removes a note (only the person who wrote or saved it, or a moderator). |
+| `/setup` | Creates the bot's channels: #notes, #meeting-notes, #weekly-digest. |
 | `/digest` | Posts the weekly round-up right now. It also posts on its own every Monday at 9:00. |
-| `/meeting summarize` | Summarizes a meeting from a transcript file, or from this channel's last few hours. *Needs AI, see below.* |
+| `/meeting summarize` | Summarizes a meeting from a transcript file, or from this channel's last few hours, and posts it in **#meeting-notes**. *Needs AI, see below.* |
 | Ask in the meeting's thread, or **@mention** the bot | Answers questions about the meeting from its full notes. *Needs AI.* |
 | `/meeting ask`, `list`, `notes` | Ask by command, see recent meetings, or download a meeting's full numbered notes. |
 
@@ -55,11 +56,15 @@ npm start
 
 The first time, it prints a link starting with `https://discord.com/oauth2/authorize…`. Open it, choose the Mibbit server and click **Authorize**. Within a few seconds the terminal shows `Commands ready in "…"`.
 
-### 6. Make the channels and connect them
+### 6. Create the channels
 
-1. In the Mibbit server, create a **Forum** channel called `#notes`. In its settings, make sure **Require tags when posting** is off.
-2. Optional: create a normal text channel for the digest, e.g. `#weekly-digest`.
-3. In any channel, run `/setup forum:#notes digest_channel:#weekly-digest`.
+In any channel of the Mibbit server, run `/setup`. The bot creates a **Mibbit Notes** category with three channels:
+
+- **#notes**: a forum where every saved note lands, with one post per tag.
+- **#meeting-notes**: where every meeting summary is posted, each with its own thread for questions.
+- **#weekly-digest**: the Monday round-up.
+
+Already have channels you'd rather use? Pick them in `/setup` (`forum:`, `meetings_channel:`, `digest_channel:`) and the bot creates only what's missing. Running `/setup` again is safe: it never makes duplicates.
 
 Done! Try `/note text: the onboarding should start with a sound #idea`.
 
@@ -69,7 +74,7 @@ Done! Try `/note text: the onboarding should start with a sound #idea`.
 
 ### What you get
 
-`/meeting summarize file:<transcript>` (or `hours:2` to use this channel's recent messages) posts:
+`/meeting summarize file:<transcript>` (or `hours:2` to use this channel's recent messages) posts in **#meeting-notes**, wherever you run the command:
 
 - **⭐ Important**: key points, decisions (with the reason) and action items (with owner and due date).
 - **🔄 Changes**: what's different from before, for example *Launch date: ~~Dec 1~~ → **Dec 8***. The bot compares against the decision log, so a meeting that reverses an earlier decision shows up here.

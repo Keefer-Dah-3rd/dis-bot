@@ -69,8 +69,9 @@ export const commandDefs = [
 
   new SlashCommandBuilder()
     .setName('setup')
-    .setDescription('Choose where notes and the weekly digest go')
+    .setDescription('Create the bot’s channels (or pick existing ones)')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addChannelOption((o) => o.setName('forum').setDescription('Forum channel where notes are filed').setRequired(true).addChannelTypes(ChannelType.GuildForum))
-    .addChannelOption((o) => o.setName('digest_channel').setDescription('Channel for the Monday digest').addChannelTypes(ChannelType.GuildText)),
+    .addChannelOption((o) => o.setName('forum').setDescription('Forum for notes (default: create #notes)').addChannelTypes(ChannelType.GuildForum))
+    .addChannelOption((o) => o.setName('meetings_channel').setDescription('Where meeting summaries go (default: create #meeting-notes)').addChannelTypes(ChannelType.GuildText))
+    .addChannelOption((o) => o.setName('digest_channel').setDescription('Where the Monday digest goes (default: create #weekly-digest)').addChannelTypes(ChannelType.GuildText)),
 ].map((c) => c.toJSON());

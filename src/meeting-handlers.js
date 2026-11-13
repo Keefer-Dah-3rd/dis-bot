@@ -110,11 +110,23 @@ export function createMeetingHandlers({ client, repo, ai, fetchText = defaultFet
       repo.setMeetingSummary(meeting.id, summary);
       const stored = repo.getMeeting(i.guildId, meeting.id);
 
-      const msg = await i.editReply({
+      const post = {
         ...renderSummary(stored, summary),
         files: [new AttachmentBuilder(notesFile(stored), { name: `meeting-${meeting.id}-notes.txt` })],
         allowedMentions: { parse: [] },
-      });
+      };
+
+      // Summaries live in the meeting-notes channel. If the command was run
+      // somewhere else, post there and leave a pointer here.
+      const homeId = repo.getSetting(i.guildId, 'meetings_channel');
+      const home = homeId && homeId !== i.channelId ? await client.channels.fetch(homeId).catch(() => null) : null;
+      let msg;
+      if (home?.isTextBased?.()) {
+        msg = await home.send(post);
+        await i.editReply({ content: `🎙️ Meeting notes for **${snippet(summary.title, 80)}** are in <#${home.id}>: ${msg.url}`, allowedMentions: { parse: [] } });
+      } else {
+        msg = await i.editReply(post);
+      }
 
       let thread = null;
       try {

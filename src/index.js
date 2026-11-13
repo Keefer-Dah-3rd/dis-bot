@@ -18,6 +18,7 @@ import { buildDigest, digestSlot } from './digest.js';
 import { createMeetingHandlers } from './meeting-handlers.js';
 import { forumConfigured, noteComponents, noteEmbed, queueFile, queueRefresh, serial, unfile } from './filing.js';
 import { fitLines, noteListLine, snippet } from './format.js';
+import { CHANNELS, ensureChannels } from './setup.js';
 import { PICKABLE_TAGS, TAGS, tagFromText, tagLine } from './tags.js';
 
 const token = process.env.DISCORD_TOKEN?.trim();
@@ -48,7 +49,7 @@ const meetings = createMeetingHandlers({ client, repo, ai });
 
 // ---------- helpers ----------
 
-const SETUP_HINT = '\n-# Notes aren’t being filed anywhere yet — an admin can run `/setup` to pick a forum channel.';
+const SETUP_HINT = '\n-# Notes aren’t being filed anywhere yet — an admin can run `/setup` to create the channels.';
 
 function savedReply(note) {
   return `Saved as **${tagLine(note.tag)} #${note.id}**.${forumConfigured(repo, note.guild_id) ? '' : SETUP_HINT}`;
@@ -190,15 +191,25 @@ const handlers = {
   meeting: (i) => meetings.command(i),
 
   async setup(i) {
-    const forum = i.options.getChannel('forum', true);
-    const digestChannel = i.options.getChannel('digest_channel');
-    repo.setSetting(i.guildId, 'notes_forum', forum.id);
-    if (digestChannel) repo.setSetting(i.guildId, 'digest_channel', digestChannel.id);
+    await i.deferReply({ flags: EPHEMERAL });
+    let channels;
+    try {
+      channels = await ensureChannels(i.guild, repo, {
+        notes_forum: i.options.getChannel('forum'),
+        meetings_channel: i.options.getChannel('meetings_channel'),
+        digest_channel: i.options.getChannel('digest_channel'),
+      });
+    } catch (err) {
+      if (err?.code === 50013) {
+        return i.editReply('I need the **Manage Channels** permission to create channels. Re-add me with the invite link from the terminal, or create the channels yourself and pick them in `/setup`.');
+      }
+      throw err;
+    }
     const day = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][DIGEST_DAY] ?? 'Monday';
-    const digestLine = digestChannel || repo.getSetting(i.guildId, 'digest_channel')
-      ? `The weekly digest posts in <#${digestChannel?.id ?? repo.getSetting(i.guildId, 'digest_channel')}> every ${day} at ${DIGEST_HOUR}:00.`
-      : 'No digest channel yet — add one with `/setup` any time, or run `/digest` by hand.';
-    await i.reply({ content: `All set. Notes will be filed in <#${forum.id}>, with one post per tag.\n${digestLine}`, flags: EPHEMERAL });
+    const when = { notes_forum: 'one post per tag', meetings_channel: 'every `/meeting summarize` posts here', digest_channel: `every ${day} at ${DIGEST_HOUR}:00` };
+    const lines = Object.entries(CHANNELS).map(([key, def]) =>
+      `${def.label} → <#${channels[key]}> (${when[key]})${channels.created.includes(channels[key]) ? ' · *new*' : ''}`);
+    await i.editReply(`All set.\n${lines.join('\n')}`);
   },
 };
 
@@ -318,6 +329,7 @@ client.once(Events.ClientReady, async () => {
       PermissionFlagsBits.ReadMessageHistory,
       PermissionFlagsBits.AddReactions,
       PermissionFlagsBits.AttachFiles,
+      PermissionFlagsBits.ManageChannels,
     ],
   });
   if (client.guilds.cache.size === 0) {
