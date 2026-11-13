@@ -1,0 +1,60 @@
+WEBVTT
+
+NOTE
+SAMPLE TRANSCRIPT, made up for testing the bot. Not a real meeting.
+
+1
+00:00:02.000 --> 00:00:06.000
+<v Ana>Morning! Did you see the snow? My bike was not happy.</v>
+
+2
+00:00:06.500 --> 00:00:09.000
+<v Ben>Ha, yeah. Okay, let's get going, I have a hard stop at half past.</v>
+
+3
+00:00:12.000 --> 00:00:21.000
+<v Ana>So first thing, the beta launch. Last week we said December 1st. I don't think the sampler redesign is going to be ready by then.</v>
+
+4
+00:00:22.000 --> 00:00:34.000
+<v Ben>Agreed. The pad grid is fine but the waveform editor still drops frames on older iPads. I'd rather push than ship that. Let's move the beta to December 8th.</v>
+
+5
+00:00:35.000 --> 00:00:38.000
+<v Ana>December 8th works. I'll tell the testers.</v>
+
+6
+00:01:05.000 --> 00:01:19.000
+<v Ana>Second thing. I was going to own the sampler redesign end to end, but with the performance work it really needs an engineer driving it. Can you take it over?</v>
+
+7
+00:01:20.000 --> 00:01:30.000
+<v Ben>Yes, I'll take the sampler. You keep the onboarding flow and the sound pack art.</v>
+
+8
+00:01:52.000 --> 00:02:08.000
+<v Ben>On onboarding: we talked about starting with a tutorial video. I think we should drop the video and start with a sound instead. People should press a pad in the first five seconds.</v>
+
+9
+00:02:09.000 --> 00:02:16.000
+<v Ana>Love that. Decided, no video. First screen is one glowing pad that plays a welcome sound.</v>
+
+10
+00:02:40.000 --> 00:02:52.000
+<v Ben>I'll fix the waveform frame drops and get a TestFlight build out by Thursday.</v>
+
+11
+00:02:53.000 --> 00:03:03.000
+<v Ana>And I'll have the new onboarding screens in Figma by Wednesday so you can look before the build.</v>
+
+12
+00:03:30.000 --> 00:03:44.000
+<v Ben>One thing we haven't figured out is pricing for the sound packs. Free, one-off, or part of a subscription? We don't need it for the beta but we need it before launch.</v>
+
+13
+00:03:45.000 --> 00:03:50.000
+<v Ana>Let's park it. Maybe ask the testers.</v>
+
+14
+00:04:10.000 --> 00:04:14.000
+<v Ben>Okay, that's it from me. Good luck with the snow.</v>
