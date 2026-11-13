@@ -1,5 +1,6 @@
-node_modules/
-data/
 .env
-supabase/.env*
 .env.secrets
+data/
+node_modules/
+supabase/.env*
+supabase/.temp

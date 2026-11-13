@@ -34,20 +34,15 @@ On **Supabase** (free plan): a small function that Discord calls, plus a databas
 
 The Discord side (the app, its settings, adding it to the server) is already done. To put the bot on Supabase:
 
-1. **Create the project.** Sign up at [supabase.com](https://supabase.com), then **New project** → name it `mibbit-notes` and pick the region nearest you. It asks for a database password: save it in your password manager.
-2. **Log in from this folder:**
+1. **Create the project.** At [supabase.com](https://supabase.com), **New project** in your free organization → name it `mibbit-notes`. For the database password, use **Generate a password**: the bot never needs it. You can untick **Data API**, since the bot talks to the database directly.
+2. **Give this folder access.** In Supabase, open **Account → Access Tokens** ([link](https://supabase.com/dashboard/account/tokens)) → **Generate new token**. Paste it after `SUPABASE_ACCESS_TOKEN=` in `.env`.
+3. **Link this folder to the project** (the project ID is in its dashboard address):
    ```bash
-   npx supabase login
+   npx supabase link --project-ref <project-id>
    ```
-   It opens your browser to approve.
-3. **Link this folder to the project:**
+4. **Create the tables:**
    ```bash
-   npx supabase link
-   ```
-   Pick `mibbit-notes` from the list.
-4. **Create the tables.** It asks for the database password from step 1:
-   ```bash
-   npx supabase db push
+   npx supabase db push --remote
    ```
 5. **Deploy.** This uploads the bot, saves its settings in Supabase, registers the commands and points Discord at the bot:
    ```bash

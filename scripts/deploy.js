@@ -2,7 +2,8 @@
 //
 //   npm run deploy
 //
-// Run `npx supabase login` and `npx supabase link` once first (see README).
+// Running this is the go-ahead to change the linked Supabase project (hence --yes).
+// Needs SUPABASE_ACCESS_TOKEN in .env and `npx supabase link` once (see README).
 // Reads DISCORD_TOKEN (and optionally ANTHROPIC_API_KEY etc.) from .env.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -57,13 +58,13 @@ const secrets = {
 const secretsFile = new URL('../.env.secrets', import.meta.url).pathname;
 writeFileSync(secretsFile, Object.entries(secrets).filter(([, v]) => v?.trim()).map(([k, v]) => `${k}=${v.trim()}`).join('\n'), { mode: 0o600 });
 try {
-  supabase('secrets', 'set', '--env-file', secretsFile);
+  supabase('secrets', 'set', '--env-file', secretsFile, '--yes');
 } finally {
   rmSync(secretsFile, { force: true });
 }
 
 step('Uploading the bot to Supabase');
-supabase('functions', 'deploy', 'discord-bot', '--no-verify-jwt', '--use-api');
+supabase('functions', 'deploy', 'discord-bot', '--no-verify-jwt', '--use-api', '--yes');
 
 step('Registering the slash commands in each server');
 const discord = createDiscord({ token, appId: app.id });
