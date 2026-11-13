@@ -141,7 +141,9 @@ export function openDb(file = ':memory:') {
     addQuestion: db.prepare(`
       INSERT INTO meeting_questions (meeting_id, asked_by_id, question, answer, created_at) VALUES (?, ?, ?, ?, ?)`),
     recentQuestions: db.prepare(`
-      SELECT * FROM (SELECT * FROM meeting_questions WHERE meeting_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`),
+      SELECT * FROM (SELECT * FROM meeting_questions WHERE meeting_id = ? AND created_at >= ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`),
+    meetingByRaw: db.prepare(`
+      SELECT * FROM meetings WHERE guild_id = ? AND raw = ? AND summary IS NOT NULL ORDER BY id DESC LIMIT 1`),
   };
 
   const repo = {
@@ -201,7 +203,8 @@ export function openDb(file = ':memory:') {
     listMeetings: (guildId, limit = 10) => s.listMeetings.all(guildId, limit),
     addQuestion: (meetingId, userId, question, answer, at = Date.now()) =>
       s.addQuestion.run(meetingId, userId, question, answer, at),
-    recentQuestions: (meetingId, limit = 4) => s.recentQuestions.all(meetingId, limit),
+    recentQuestions: (meetingId, limit = 3, since = 0) => s.recentQuestions.all(meetingId, since, limit),
+    findMeetingByRaw: (guildId, raw) => hydrateMeeting(s.meetingByRaw.get(guildId, raw)),
 
     close: () => db.close(),
   };

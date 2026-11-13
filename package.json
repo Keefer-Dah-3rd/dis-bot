@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.js",
     "test": "node --test test/*.test.js",
-    "try-meeting": "node --env-file-if-exists=.env scripts/try-meeting.js"
+    "try-meeting": "node --env-file-if-exists=.env scripts/try-meeting.js",
+    "token-report": "node scripts/token-report.js"
   },
   "engines": {
     "node": ">=22.9"

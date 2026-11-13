@@ -10,6 +10,7 @@ import {
   PermissionFlagsBits,
   StringSelectMenuBuilder,
 } from 'discord.js';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createAi } from './ai.js';
 import { commandDefs, SAVE_AS_NOTE } from './commands.js';
@@ -307,8 +308,13 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
   }
 });
 
+// Only re-sends the command list to Discord when it has changed.
+const COMMANDS_HASH = createHash('sha256').update(JSON.stringify(commandDefs)).digest('hex').slice(0, 16);
 async function registerCommands(guild) {
-  await guild.commands.set(commandDefs);
+  if (repo.getSetting(guild.id, 'commands_hash') !== COMMANDS_HASH) {
+    await guild.commands.set(commandDefs);
+    repo.setSetting(guild.id, 'commands_hash', COMMANDS_HASH);
+  }
   console.log(`Commands ready in “${guild.name}”.`);
 }
 

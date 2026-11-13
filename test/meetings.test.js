@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db.js';
-import { parseTranscript, fromMessages, renderSegments, shortTime } from '../src/transcript.js';
+import { parseTranscript, fromMessages, renderForModel, renderSegments, shortTime, stripFiller } from '../src/transcript.js';
 import {
-  ANSWER_SCHEMA, SECTION_TITLES, SUMMARY_SCHEMA,
+  ANSWER_SCHEMA, EARLIER_DECISIONS_LIMIT, SECTION_TITLES, SUMMARY_SCHEMA, summaryText,
   answerQuestion, buildQuestionRequest, buildSummaryRequest, formatAnswer,
   normalizeSummary, notesFile, renderSummary, summarizeMeeting,
 } from '../src/meetings.js';
-import { AI_OFF, createMeetingHandlers, looksLikeQuestion, NO_MEETINGS } from '../src/meeting-handlers.js';
+import { AI_OFF, ASK_HINT, createMeetingHandlers, looksLikeQuestion, NO_MEETINGS } from '../src/meeting-handlers.js';
 
 const G = 'guild';
 
@@ -150,8 +150,9 @@ test('summary request includes the numbered notes and earlier decisions to compa
     earlierDecisions: [{ id: 3, content: 'Launch on December 1', why: 'Holiday traffic', created_at: Date.UTC(2026, 9, 1) }],
   });
   const body = req.messages[0].content;
-  assert.match(body, /<earlier_decisions>\n- \(#3, 2026-10-01\) Launch on December 1 — why: Holiday traffic/);
-  assert.match(body, /\[S2 · 1:10\] Ben: Agreed, let's move launch to December 8\./);
+  assert.match(body, /<earlier_decisions>\n- 2026-10-01: Launch on December 1\n<\/earlier_decisions>/, 'date + decision only, no reason');
+  assert.match(body, /\[S2\] Ben: Agreed, let's move launch to December 8\./);
+  assert.doesNotMatch(body, /\[S\d+ · /, 'no timestamps sent to Claude');
   assert.match(req.system, /important\.key_points/);
   assert.match(req.system, /changes: anything that changes/);
   assert.equal(req.schema, SUMMARY_SCHEMA);
@@ -239,7 +240,8 @@ test('question request carries the full notes (cached), earlier Q&A, then the ne
   const notes = req.system[1];
   assert.equal(notes.cache_control.type, 'ephemeral');
   for (const seg of m.segments) assert.ok(notes.text.includes(seg.text), `segment S${seg.n} sent`);
-  assert.match(notes.text, /<summary>.*Launch moves to December 8/);
+  assert.match(notes.text, /<summary>\n[\s\S]*Decisions:\n- Launch moves to December 8\. \(why: Pads need another week\.\) \[S2\]/, 'summary as plain text');
+  assert.doesNotMatch(notes.text, /"key_points"/, 'not JSON');
   assert.match(req.system[0].text, /say so plainly/);
   assert.deepEqual(req.messages.map((x) => x.role), ['user', 'assistant', 'user']);
   assert.equal(req.messages.at(-1).content, 'Who updates the checklist?');
@@ -360,4 +362,89 @@ test('no meetings yet', async () => {
   const msg = fakeMessage({ content: '<@42> when is launch?', mentionsBot: true });
   await handlers.onMessage(msg);
   assert.equal(msg.replies[0].content, NO_MEETINGS);
+});
+
+
+// ---------- token savings ----------
+
+test('filler words are dropped from what Claude reads, but kept in the stored notes', () => {
+  assert.equal(stripFiller('Um, so I think the, uh, onboarding flow is mostly there.'), 'so I think the onboarding flow is mostly there.');
+  assert.equal(stripFiller('Right. Um. Next thing'), 'Right. Next thing');
+  assert.equal(stripFiller('We hum along with the umbrella.'), 'We hum along with the umbrella.', 'real words untouched');
+  assert.equal(stripFiller('Uhh'), 'Uhh', 'a line that is only filler is kept');
+  const segs = parseTranscript('[00:05] Ana: Um, launch is, uh, Friday.');
+  assert.equal(renderForModel(segs), '[S1] Ana: launch is Friday.');
+  assert.match(renderSegments(segs), /Um, launch is, uh, Friday\./, 'downloadable notes stay word-for-word');
+});
+
+test('only the 15 most recent earlier decisions are sent, each kept short', () => {
+  const decisions = Array.from({ length: 40 }, (_, k) => ({ id: k, content: `Decision ${k} ${'x'.repeat(300)}`, why: 'long reason', created_at: Date.UTC(2026, 9, 1) }));
+  const body = buildSummaryRequest({ segments: parseTranscript(VTT), earlierDecisions: decisions }).messages[0].content;
+  const listed = body.split('</earlier_decisions>')[0].split('\n').filter((l) => l.startsWith('- '));
+  assert.equal(listed.length, EARLIER_DECISIONS_LIMIT);
+  assert.ok(listed.every((l) => l.length < 170));
+  assert.doesNotMatch(body, /long reason/);
+});
+
+test('the summary asks for short lists and at most 3 citations per item', () => {
+  const req = buildSummaryRequest({ segments: parseTranscript(VTT) });
+  assert.match(req.system, /at most 5/);
+  assert.match(req.system, /1-3 segment numbers/);
+});
+
+test('summary as plain text is much smaller than JSON', () => {
+  const segments = parseTranscript(VTT);
+  const s = normalizeSummary(SUMMARY, segments);
+  assert.ok(summaryText(s).length < JSON.stringify(s).length * 0.75, `${summaryText(s).length} vs ${JSON.stringify(s).length}`);
+  assert.match(summaryText(s), /Changes:\n- Launch date: December 1 -> December 8 \[S1,S2\]/);
+  assert.equal(summaryText(null), '');
+});
+
+test('only recent questions are sent as history', async () => {
+  const { repo, meeting, ai, handlers } = setup();
+  const hourAgo = Date.now() - 60 * 60 * 1000;
+  repo.addQuestion(meeting.id, 'x', 'Old question?', 'Old answer.', hourAgo);
+  for (const q of ['One?', 'Two?', 'Three?', 'Four?']) repo.addQuestion(meeting.id, 'x', q, 'A.');
+  await handlers.onMessage(fakeMessage({ content: 'And five?', channelId: 'thread1' }));
+  const sent = ai.calls[0].messages.filter((m) => m.role === 'user').map((m) => m.content);
+  assert.deepEqual(sent, ['Two?', 'Three?', 'Four?', 'And five?'], 'last 3 from the past 30 minutes, nothing older');
+});
+
+test('a very long question is cut down before it is sent', async () => {
+  const { ai, handlers } = setup();
+  await handlers.onMessage(fakeMessage({ content: `why ${'x'.repeat(3000)}?`, channelId: 'thread1' }));
+  assert.ok(ai.calls[0].messages.at(-1).content.length <= 501);
+});
+
+test('an @mention that is not a question gets a free tip, not an AI call', async () => {
+  const { ai, handlers } = setup();
+  const hi = fakeMessage({ content: '<@42> hi!', mentionsBot: true });
+  await handlers.onMessage(hi);
+  assert.equal(hi.replies[0].content, ASK_HINT);
+  assert.equal(ai.calls.length, 0);
+});
+
+test('summarizing the same transcript twice reuses the first summary', async () => {
+  const repo = openDb();
+  const segments = parseTranscript(VTT);
+  const first = repo.addMeeting({ guild_id: G, title: 'call', source: 'file: call.vtt', raw: VTT, segments, created_by_id: 'u1' });
+  repo.setMeetingSummary(first.id, normalizeSummary(SUMMARY, segments));
+  repo.setMeetingPost(first.id, 'notes-chan', 'msg9', 't9');
+
+  let calls = 0;
+  const handlers = createMeetingHandlers({
+    client: { user: { id: '42' }, channels: { fetch: async () => { throw new Error('none'); } } },
+    repo,
+    ai: { async json() { calls += 1; return { data: SUMMARY }; } },
+    fetchText: async () => VTT,
+  });
+  const edits = [];
+  await handlers.command({
+    guildId: G, channelId: 'c', channel: { name: 'general' }, user: { id: 'u1' },
+    options: { getSubcommand: () => 'summarize', getAttachment: () => ({ name: 'call.vtt', url: 'u', size: 10, contentType: 'text/vtt' }), getInteger: () => null, getString: () => null },
+    async deferReply() {},
+    async editReply(p) { edits.push(p); return {}; },
+  });
+  assert.equal(calls, 0, 'no AI call');
+  assert.match(edits[0], /already summarized as meeting #1.*\/notes-chan\/msg9/);
 });

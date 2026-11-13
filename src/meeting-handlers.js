@@ -9,7 +9,12 @@ const EPHEMERAL = MessageFlags.Ephemeral;
 const TEXT_FILE = /\.(txt|text|vtt|srt|md|markdown)$/i;
 const MEDIA_FILE = /\.(mp3|m4a|wav|aac|flac|ogg|opus|mp4|mov|webm|mkv|avi)$/i;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
-const HISTORY = 4; // earlier questions about the same meeting the bot remembers
+// Follow-ups ("why did it move?") need the last few exchanges, but older ones
+// are just extra tokens on every question.
+const HISTORY = 3;
+const HISTORY_WINDOW_MS = 30 * 60 * 1000;
+const MAX_QUESTION_CHARS = 500;
+export const ASK_HINT = 'Ask me a question about a meeting, like “@Mibbit Notes who owns the checklist?”, or use `/meeting ask`.';
 
 export const AI_OFF = 'Meeting summaries and questions use AI, which isn’t switched on for this bot yet. Whoever runs the bot can turn it on by adding an Anthropic API key to `.env` (see “Meeting notes” in the README).';
 export const NO_MEETINGS = 'There are no meeting summaries yet. Make one with `/meeting summarize`.';
@@ -18,7 +23,7 @@ const THREAD_INTRO = 'Ask me anything about this meeting here. I answer from the
 // In a meeting thread, only messages that look like questions get an answer,
 // so "thanks!" doesn't cost anything. @mentioning the bot always works.
 export function looksLikeQuestion(text) {
-  return /\?/.test(text) || /^(who|what|when|where|why|how|which|did|do|does|is|are|was|were|can|could|should|will|would|has|have|any|tell|summari[sz]e|list|explain)\b/i.test(text.trim());
+  return /\?/.test(text) || /^(who|what|when|where|why|how|which|did|do|does|is|are|was|were|can|could|should|will|would|has|have|any|tell|summari[sz]e|list|explain|recap|remind|show|find|give)\b/i.test(text.trim());
 }
 
 function errorText(err) {
@@ -45,6 +50,7 @@ async function recentMessages(channel, hours) {
     for (const m of batch.values()) {
       if (m.createdTimestamp < cutoff) { reachedCutoff = true; break; }
       if (m.author.bot) continue;
+      if (!/[\p{L}\p{N}]/u.test(m.content) && !m.attachments.size) continue; // emoji-only reactions in chat
       out.push({
         createdAt: m.createdAt,
         speaker: m.member?.displayName ?? m.author.globalName ?? m.author.username,
@@ -60,7 +66,8 @@ async function recentMessages(channel, hours) {
 
 export function createMeetingHandlers({ client, repo, ai, fetchText = defaultFetchText }) {
   async function ask(meeting, question, userId, { showWhich = false } = {}) {
-    const history = repo.recentQuestions(meeting.id, HISTORY);
+    question = question.length > MAX_QUESTION_CHARS ? `${question.slice(0, MAX_QUESTION_CHARS)}…` : question;
+    const history = repo.recentQuestions(meeting.id, HISTORY, Date.now() - HISTORY_WINDOW_MS);
     const { text } = await answerQuestion(ai, meeting, history, question);
     repo.addQuestion(meeting.id, userId, question, text);
     return showWhich ? `-# About meeting #${meeting.id}: ${snippet(meeting.title, 80)}\n${text}` : text;
@@ -99,6 +106,12 @@ export function createMeetingHandlers({ client, repo, ai, fetchText = defaultFet
         source = `#${i.channel?.name ?? 'channel'}, last ${hours}h`;
       }
       if (!segments.length) return i.editReply('I couldn’t find any text to summarize.');
+
+      // The same transcript twice? Point to the summary we already paid for.
+      const already = repo.findMeetingByRaw(i.guildId, raw);
+      if (already?.message_id) {
+        return i.editReply(`🎙️ That was already summarized as meeting #${already.id}, **${snippet(already.title, 80)}**: https://discord.com/channels/${i.guildId}/${already.channel_id}/${already.message_id}`);
+      }
       if (renderSegments(segments).length > MAX_NOTES_CHARS) {
         return i.editReply('Those notes are too long for one summary. Split the meeting into parts and summarize each.');
       }
@@ -202,8 +215,12 @@ export function createMeetingHandlers({ client, repo, ai, fetchText = defaultFet
 
       const question = String(msg.content ?? '').replace(/<@!?\d+>/g, '').trim();
       if (!question) return;
-      if (meeting && !mentioned && !looksLikeQuestion(question)) return;
       const quiet = { allowedMentions: { parse: [], repliedUser: false } };
+      if (!looksLikeQuestion(question)) {
+        // In a meeting thread, chatter is ignored. A mention that isn't a
+        // question ("@Mibbit Notes hi") gets a free tip instead of an AI call.
+        return meeting && !mentioned ? undefined : msg.reply({ content: ASK_HINT, ...quiet });
+      }
       if (!ai) return msg.reply({ content: AI_OFF, ...quiet });
 
       let showWhich = false;

@@ -29,6 +29,18 @@ export function renderSegments(segments) {
   return segments.map((s) => `${label(s)} ${s.speaker ? `${s.speaker}: ` : ''}${s.text}`).join('\n');
 }
 
+// What Claude reads: no timestamps (the bot adds them back when it shows a
+// citation) and no "um"/"uh" filler. Saves tokens on every summary and question.
+export function renderForModel(segments) {
+  return segments.map((s) => `[S${s.n}] ${s.speaker ? `${s.speaker}: ` : ''}${stripFiller(s.text)}`).join('\n');
+}
+
+const FILLER = /(?:,\s*)?\b(?:u+m+|u+h+|e+r+m+|h+m+)\b[,.]?/gi;
+export function stripFiller(text) {
+  const cleaned = text.replace(FILLER, ' ').replace(/\s{2,}/g, ' ').replace(/\s+([,.;!?])/g, '$1').replace(/^[,.;\s]+/, '').trim();
+  return cleaned || text; // never blank out a line that was only filler
+}
+
 export function label(segment) {
   return `[S${segment.n}${segment.time ? ` · ${segment.time}` : ''}]`;
 }
