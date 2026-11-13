@@ -7,9 +7,14 @@ export class AiError extends Error {}
 // AI is off unless ANTHROPIC_API_KEY is in .env. The key is passed explicitly so
 // the bot never falls back to some other Anthropic login on this computer and
 // spends credits nobody agreed to.
-export function createAi({ apiKey = process.env.ANTHROPIC_API_KEY?.trim(), model = process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_MODEL } = {}) {
+// `timeoutMs` keeps a slow answer from outliving the 150-second limit the
+// bot's host gives each request; the bot then says so instead of going quiet.
+/** @param {{ apiKey?: string, model?: string, timeoutMs?: number }} [options] */
+export function createAi({ apiKey, model, timeoutMs = 120_000 } = {}) {
+  apiKey = apiKey?.trim();
+  model = model?.trim() || DEFAULT_MODEL;
   if (!apiKey) return null;
-  const client = new Anthropic({ apiKey });
+  const client = new Anthropic({ apiKey, timeout: timeoutMs, maxRetries: 1 });
   // Haiku has no server-side fallback; every other current model does.
   const fallback = model.startsWith('claude-haiku') ? {} : { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' };
 
@@ -50,7 +55,8 @@ function friendlyError(err) {
   if (err instanceof Anthropic.PermissionDeniedError) return new AiError('The Anthropic API key doesn’t have access to this model.');
   if (err instanceof Anthropic.RateLimitError) return new AiError('Too many AI requests right now (or the credit balance ran out). Try again in a minute.');
   if (err instanceof Anthropic.BadRequestError) return new AiError(`The AI request was rejected: ${err.message}`);
-  if (err instanceof Anthropic.APIConnectionError) return new AiError('Couldn’t reach the Anthropic API. Check the internet connection.');
+  if (err instanceof Anthropic.APIConnectionTimeoutError) return new AiError('Claude took too long to answer. Try again, or split a very long meeting into parts.');
+  if (err instanceof Anthropic.APIConnectionError) return new AiError('Couldn’t reach the Anthropic API. Try again in a minute.');
   if (err instanceof Anthropic.APIError) return new AiError(`The Anthropic API had a problem (${err.status}). Try again.`);
   return err;
 }

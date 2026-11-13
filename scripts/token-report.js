@@ -7,8 +7,8 @@
 // That ratio is approximate; use it to compare versions, not as an exact bill.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildQuestionRequest, buildSummaryRequest, normalizeSummary, SUMMARY_SCHEMA, ANSWER_SCHEMA } from '../src/meetings.js';
-import { parseTranscript } from '../src/transcript.js';
+import { buildQuestionRequest, buildSummaryRequest, normalizeSummary, SUMMARY_SCHEMA, ANSWER_SCHEMA } from '../supabase/functions/_shared/meetings.js';
+import { parseTranscript } from '../supabase/functions/_shared/transcript.js';
 
 const tokens = (x) => Math.round((typeof x === 'string' ? x : JSON.stringify(x)).length / 4);
 const textOf = (content) => (typeof content === 'string' ? content : content.map((b) => b.text).join(''));

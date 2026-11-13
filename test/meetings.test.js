@@ -1,29 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDb } from '../src/db.js';
-import { parseTranscript, fromMessages, renderForModel, renderSegments, shortTime, stripFiller } from '../src/transcript.js';
+import { click, command, fakeAi, fakeDiscord, freshDb, makeBot, submitForm } from './helpers.js';
+import { CHANNEL } from '../supabase/functions/_shared/discord-api.js';
+import { parseTranscript, fromMessages, renderForModel, renderSegments, shortTime, stripFiller } from '../supabase/functions/_shared/transcript.js';
 import {
   ANSWER_SCHEMA, EARLIER_DECISIONS_LIMIT, SECTION_TITLES, SUMMARY_SCHEMA, summaryText,
   answerQuestion, buildQuestionRequest, buildSummaryRequest, formatAnswer,
   normalizeSummary, notesFile, renderSummary, summarizeMeeting,
-} from '../src/meetings.js';
-import { AI_OFF, ASK_HINT, createMeetingHandlers, looksLikeQuestion, NO_MEETINGS } from '../src/meeting-handlers.js';
+} from '../supabase/functions/_shared/meetings.js';
+import { AI_OFF, NO_MEETINGS, THREAD_INTRO } from '../supabase/functions/_shared/meeting-handlers.js';
 
 const G = 'guild';
-
-// Stands in for Claude: records each request and replies with canned JSON. Costs nothing.
-function fakeAi(...replies) {
-  const calls = [];
-  return {
-    calls,
-    model: 'fake',
-    async json(req) {
-      calls.push(req);
-      const next = replies.length > 1 ? replies.shift() : replies[0];
-      return { data: typeof next === 'function' ? next(req) : structuredClone(next) };
-    },
-  };
-}
 
 const VTT = `WEBVTT
 
@@ -60,12 +47,10 @@ const SUMMARY = {
   open_questions: [{ text: 'Pricing is undecided.', refs: [4] }],
 };
 
-function storedMeeting(repo, summary = SUMMARY) {
+// A stored meeting, as the database returns it.
+function meetingObj(summary = SUMMARY, extra = {}) {
   const segments = parseTranscript(VTT);
-  const m = repo.addMeeting({ guild_id: G, title: 'call', source: 'file: call.vtt', raw: VTT, segments, created_by_id: 'u1' });
-  repo.setMeetingSummary(m.id, normalizeSummary(summary, segments));
-  repo.setMeetingPost(m.id, 'chan', 'msg1', 'thread1');
-  return repo.getMeeting(G, m.id);
+  return { id: 1, guild_id: G, title: 'Launch timing', source: 'file: call.vtt', raw: VTT, segments, summary: normalizeSummary(summary, segments), created_at: Date.now(), thread_id: 'thread1', ...extra };
 }
 
 // ---------- reading transcripts ----------
@@ -110,24 +95,30 @@ test('Discord messages become segments, and times shorten correctly', () => {
 
 // ---------- storing the full notes ----------
 
-test('a meeting keeps its full notes, not just the summary', () => {
-  const repo = openDb();
-  const m = storedMeeting(repo);
+test('a meeting keeps its full notes, not just the summary', async () => {
+  const { repo } = await freshDb();
+  const segments = parseTranscript(VTT);
+  const created = await repo.addMeeting({ guild_id: G, title: 'call', source: 'file: call.vtt', raw: VTT, segments, created_by_id: 'u1' });
+  await repo.setMeetingSummary(created.id, normalizeSummary(SUMMARY, segments));
+  await repo.setMeetingPost(created.id, 'chan', 'msg1', 'thread1');
+  const m = await repo.getMeeting(G, created.id);
   assert.equal(m.raw, VTT, 'raw transcript stored as-is');
   assert.equal(m.segments.length, 4, 'every segment stored');
   assert.equal(m.title, 'Launch timing', 'title from the summary');
-  assert.equal(repo.meetingByThread(G, 'thread1').id, m.id);
-  assert.equal(repo.meetingByMessage(G, 'msg1').id, m.id);
-  assert.equal(repo.latestMeeting(G).id, m.id);
-  assert.equal(repo.latestMeeting('other'), null);
-  assert.match(notesFile(m).toString(), /\[S4 · 3:00\] Ana: Still not sure about pricing\./);
+  assert.equal(m.summary.changes[0].after, 'December 8');
+  assert.equal((await repo.meetingByThread(G, 'thread1')).id, m.id);
+  assert.equal((await repo.meetingByMessage(G, 'msg1')).id, m.id);
+  assert.equal((await repo.latestMeeting(G)).id, m.id);
+  assert.equal(await repo.latestMeeting('other'), null);
+  assert.equal((await repo.findMeetingByRaw(G, VTT)).id, m.id, 'same transcript is recognised');
+  assert.match(notesFile(m), /\[S4 · 3:00\] Ana: Still not sure about pricing\./);
 });
 
-test('meetings without a finished summary are not offered for questions', () => {
-  const repo = openDb();
-  repo.addMeeting({ guild_id: G, title: 'x', source: 's', raw: 'a', segments: [{ n: 1, time: null, speaker: null, text: 'a' }], created_by_id: 'u' });
-  assert.equal(repo.latestMeeting(G), null);
-  assert.equal(repo.listMeetings(G).length, 0);
+test('meetings without a finished summary are not offered for questions', async () => {
+  const { repo } = await freshDb();
+  await repo.addMeeting({ guild_id: G, title: 'x', source: 's', raw: 'a', segments: [{ n: 1, time: null, speaker: null, text: 'a' }], created_by_id: 'u' });
+  assert.equal(await repo.latestMeeting(G), null);
+  assert.equal((await repo.listMeetings(G)).length, 0);
 });
 
 // ---------- summary sections ----------
@@ -173,10 +164,9 @@ test('summary is cleaned up: bad citations dropped, empty items removed', () => 
 });
 
 test('rendered summary: decisions and action items under Important, before → after under Changes', () => {
-  const repo = openDb();
-  const m = storedMeeting(repo);
+  const m = meetingObj();
   const { embeds } = renderSummary(m, m.summary);
-  const [header, important, changes, open] = embeds.map((e) => e.data);
+  const [header, important, changes, open] = embeds;
 
   assert.equal(header.title, '🎙️ Launch timing');
   assert.equal(important.title, SECTION_TITLES.important);
@@ -193,18 +183,16 @@ test('rendered summary: decisions and action items under Important, before → a
 });
 
 test('no changes and no open questions are shown clearly', () => {
-  const repo = openDb();
-  const m = storedMeeting(repo, { ...SUMMARY, changes: [], open_questions: [], important: { key_points: [], decisions: [], action_items: [{ task: 'Tidy', owner: '', due: '', refs: [] }] } });
+  const m = meetingObj({ ...SUMMARY, changes: [], open_questions: [], important: { key_points: [], decisions: [], action_items: [{ task: 'Tidy', owner: '', due: '', refs: [] }] } });
   const { embeds } = renderSummary(m, m.summary);
   assert.equal(embeds.length, 3, 'open questions section is left out when empty');
-  assert.equal(embeds[2].data.description, 'No changes to earlier plans or decisions.');
-  assert.match(embeds[1].data.description, /• _unassigned_: Tidy$/);
+  assert.equal(embeds[2].description, 'No changes to earlier plans or decisions.');
+  assert.match(embeds[1].description, /• _unassigned_: Tidy$/);
 });
 
 test('huge summaries stay inside Discord limits', () => {
-  const repo = openDb();
   const many = (n, f) => Array.from({ length: n }, (_, k) => f(k));
-  const m = storedMeeting(repo, {
+  const m = meetingObj({
     ...SUMMARY,
     overview: 'o'.repeat(3000),
     important: {
@@ -216,10 +204,10 @@ test('huge summaries stay inside Discord limits', () => {
     open_questions: many(80, (k) => ({ text: `q ${k} `.repeat(20), refs: [4] })),
   });
   const { embeds } = renderSummary(m, m.summary);
-  const total = embeds.reduce((sum, e) => sum + (e.data.title?.length ?? 0) + (e.data.description?.length ?? 0), 0);
+  const total = embeds.reduce((sum, e) => sum + (e.title?.length ?? 0) + (e.description?.length ?? 0), 0);
   assert.ok(total <= 6000, `total ${total}`);
-  for (const e of embeds) assert.ok(e.data.description.length <= 4096);
-  assert.match(embeds[1].data.description, /…and \d+ more$/);
+  for (const e of embeds) assert.ok(e.description.length <= 4096);
+  assert.match(embeds[1].description, /…and \d+ more$/);
 });
 
 test('summarizeMeeting sends the request and returns a clean summary', async () => {
@@ -234,8 +222,7 @@ test('summarizeMeeting sends the request and returns a clean summary', async () 
 // ---------- questions ----------
 
 test('question request carries the full notes (cached), earlier Q&A, then the new question', () => {
-  const repo = openDb();
-  const m = storedMeeting(repo);
+  const m = meetingObj();
   const req = buildQuestionRequest(m, [{ question: 'When is launch?', answer: 'December 8 [S2 · 1:10].' }], 'Who updates the checklist?');
   const notes = req.system[1];
   assert.equal(notes.cache_control.type, 'ephemeral');
@@ -249,8 +236,7 @@ test('question request carries the full notes (cached), earlier Q&A, then the ne
 });
 
 test('answers cite where they came from', async () => {
-  const repo = openDb();
-  const m = storedMeeting(repo);
+  const m = meetingObj();
   const ai = fakeAi({ answer: 'Ben is updating the release checklist by Friday [S3].', covered: true, refs: [3] });
   const a = await answerQuestion(ai, m, [], 'Who updates the checklist?');
   assert.equal(a.text, 'Ben is updating the release checklist by Friday [S3 · 2:00].');
@@ -265,105 +251,6 @@ test('answers say when the notes do not cover the question', () => {
   assert.equal(formatAnswer({ answer: '', covered: false, refs: [] }, segs).text, 'The meeting notes don’t cover that.');
   assert.equal(formatAnswer({ answer: 'Yes [S9] and [S1].', covered: true, refs: [9, 1] }, segs).text, 'Yes and [S1 · 0:01].', 'made-up citation removed');
 });
-
-test('looksLikeQuestion filters thread chatter', () => {
-  assert.ok(looksLikeQuestion('who owns the checklist'));
-  assert.ok(looksLikeQuestion('launch date?'));
-  assert.ok(looksLikeQuestion('Summarize the pricing bit'));
-  assert.ok(!looksLikeQuestion('thanks!'));
-  assert.ok(!looksLikeQuestion('nice work everyone'));
-});
-
-// ---------- talking to the bot in Discord ----------
-
-function fakeMessage({ content, channelId = 'elsewhere', mentionsBot = false, replyTo = null, bot = false }) {
-  const replies = [];
-  return {
-    replies,
-    content,
-    guildId: G,
-    channelId,
-    author: { id: 'asker', bot },
-    mentions: { users: new Map(mentionsBot ? [['42', {}]] : []) },
-    reference: replyTo ? { messageId: replyTo } : null,
-    channel: { sendTyping: async () => {} },
-    reply: async (payload) => { replies.push(payload); return payload; },
-  };
-}
-
-function setup(aiReply) {
-  const repo = openDb();
-  const meeting = storedMeeting(repo);
-  const ai = aiReply === null ? null : fakeAi(aiReply ?? ((req) => ({ answer: `You asked: ${req.messages.at(-1).content} [S2]`, covered: true, refs: [2] })));
-  const handlers = createMeetingHandlers({ client: { user: { id: '42' } }, repo, ai });
-  return { repo, meeting, ai, handlers };
-}
-
-test('a question in the meeting thread is answered from that meeting and remembered', async () => {
-  const { repo, meeting, ai, handlers } = setup();
-  const msg = fakeMessage({ content: 'When is launch now?', channelId: 'thread1' });
-  await handlers.onMessage(msg);
-  assert.equal(msg.replies.length, 1);
-  assert.equal(msg.replies[0].content, 'You asked: When is launch now? [S2 · 1:10]');
-  assert.deepEqual(msg.replies[0].allowedMentions, { parse: [], repliedUser: false });
-  assert.equal(repo.recentQuestions(meeting.id).length, 1);
-
-  // The follow-up includes the first exchange so "it" / "that" make sense.
-  await handlers.onMessage(fakeMessage({ content: 'Why did it move?', channelId: 'thread1' }));
-  assert.deepEqual(ai.calls[1].messages.map((x) => x.content), ['When is launch now?', 'You asked: When is launch now? [S2 · 1:10]', 'Why did it move?']);
-});
-
-test('chatter in the thread is ignored; @mentions always answer', async () => {
-  const { ai, handlers } = setup();
-  const chatter = fakeMessage({ content: 'thanks!', channelId: 'thread1' });
-  await handlers.onMessage(chatter);
-  assert.equal(chatter.replies.length, 0);
-  assert.equal(ai.calls.length, 0);
-
-  const pinged = fakeMessage({ content: '<@42> recap pricing', channelId: 'thread1', mentionsBot: true });
-  await handlers.onMessage(pinged);
-  assert.equal(ai.calls.at(-1).messages.at(-1).content, 'recap pricing', 'mention stripped from the question');
-});
-
-test('@mention outside the thread uses the replied-to meeting, else the latest (and says which)', async () => {
-  const { handlers } = setup();
-  const reply = fakeMessage({ content: '<@42> what changed?', mentionsBot: true, replyTo: 'msg1' });
-  await handlers.onMessage(reply);
-  assert.doesNotMatch(reply.replies[0].content, /About meeting/);
-
-  const loose = fakeMessage({ content: '<@42> what changed?', mentionsBot: true });
-  await handlers.onMessage(loose);
-  assert.match(loose.replies[0].content, /^-# About meeting #1: Launch timing\n/);
-});
-
-test('messages that are not for the bot are ignored', async () => {
-  const { ai, handlers } = setup();
-  for (const m of [
-    fakeMessage({ content: 'what time is lunch?' }), // not in a meeting thread, no mention
-    fakeMessage({ content: 'When is launch?', channelId: 'thread1', bot: true }), // bots
-    fakeMessage({ content: '<@42>', mentionsBot: true }), // mention with no question
-  ]) {
-    await handlers.onMessage(m);
-    assert.equal(m.replies.length, 0);
-  }
-  assert.equal(ai.calls.length, 0);
-});
-
-test('without an API key the bot explains instead of answering', async () => {
-  const { handlers } = setup(null);
-  const msg = fakeMessage({ content: '<@42> when is launch?', mentionsBot: true });
-  await handlers.onMessage(msg);
-  assert.equal(msg.replies[0].content, AI_OFF);
-});
-
-test('no meetings yet', async () => {
-  const repo = openDb();
-  const handlers = createMeetingHandlers({ client: { user: { id: '42' } }, repo, ai: fakeAi({}) });
-  const msg = fakeMessage({ content: '<@42> when is launch?', mentionsBot: true });
-  await handlers.onMessage(msg);
-  assert.equal(msg.replies[0].content, NO_MEETINGS);
-});
-
 
 // ---------- token savings ----------
 
@@ -400,51 +287,160 @@ test('summary as plain text is much smaller than JSON', () => {
   assert.equal(summaryText(null), '');
 });
 
-test('only recent questions are sent as history', async () => {
-  const { repo, meeting, ai, handlers } = setup();
-  const hourAgo = Date.now() - 60 * 60 * 1000;
-  repo.addQuestion(meeting.id, 'x', 'Old question?', 'Old answer.', hourAgo);
-  for (const q of ['One?', 'Two?', 'Three?', 'Four?']) repo.addQuestion(meeting.id, 'x', q, 'A.');
-  await handlers.onMessage(fakeMessage({ content: 'And five?', channelId: 'thread1' }));
-  const sent = ai.calls[0].messages.filter((m) => m.role === 'user').map((m) => m.content);
-  assert.deepEqual(sent, ['Two?', 'Three?', 'Four?', 'And five?'], 'last 3 from the past 30 minutes, nothing older');
+// ---------- in Discord: summaries, the Ask button, /meeting ask ----------
+import { AiError } from '../supabase/functions/_shared/ai.js';
+
+const transcript = { id: 'att1', filename: 'call.vtt', url: 'https://cdn.discordapp.com/call.vtt', size: VTT.length, content_type: 'text/vtt; charset=utf-8' };
+const summarize = (options = {}, extra = {}) =>
+  command('meeting', { file: 'att1', ...options }, { sub: 'summarize', resolved: { attachments: { att1: transcript } }, ...extra });
+const answerEcho = (req) => ({ answer: `You asked: ${req.messages.at(-1).content} [S2]`, covered: true, refs: [2] });
+
+async function meetingBot({ ai = fakeAi(SUMMARY, answerEcho), home = true } = {}) {
+  const discord = fakeDiscord({ channels: [
+    { id: 'forum', type: CHANNEL.FORUM, name: 'notes' },
+    { id: 'meeting-notes', type: CHANNEL.TEXT, name: 'meeting-notes' },
+    { id: 'general', type: CHANNEL.TEXT, name: 'general' },
+  ] });
+  const bot = await makeBot({ ai, discord, fetchText: async () => VTT });
+  await bot.repo.setSetting('g', 'notes_forum', 'forum');
+  if (home) await bot.repo.setSetting('g', 'meetings_channel', 'meeting-notes');
+  return bot;
+}
+
+test('/meeting summarize posts in #meeting-notes with sections, full notes, an Ask button and a thread', async () => {
+  const bot = await meetingBot();
+  const { response } = await bot.send(summarize());
+  assert.equal(response.type, 5, 'shows “thinking…” while Claude works');
+
+  const [post] = bot.discord.posts('meeting-notes');
+  assert.deepEqual(post.embeds.map((e) => e.title), ['🎙️ Launch timing', '⭐ Important', '🔄 Changes', '❓ Open questions']);
+  assert.equal(post.components[0].components[0].custom_id, 'ask:1');
+  assert.equal(post.files[0].name, 'meeting-1-notes.txt');
+  assert.match(post.files[0].data, /\[S4 · 3:00\] Ana: Still not sure about pricing\./);
+
+  const pointer = bot.discord.state.webhooks.at(-1).body.content;
+  assert.match(pointer, /are in <#meeting-notes>: https:\/\/discord\.com\/channels\/g\/meeting-notes\//);
+
+  const thread = [...bot.discord.state.channels.values()].find((c) => c.from === post.id);
+  assert.equal(thread.name, '💬 Launch timing');
+  assert.equal(bot.discord.posts(thread.id)[0].content, THREAD_INTRO);
+
+  const m = await bot.repo.latestMeeting('g');
+  assert.equal(m.raw, VTT);
+  assert.deepEqual([m.channel_id, m.message_id, m.thread_id], ['meeting-notes', post.id, thread.id]);
+  const [decision] = await bot.repo.recentDecisions('g');
+  assert.equal(decision.content, 'Launch moves to December 8.', 'decisions go into the decision log');
+});
+
+test('with no meeting-notes channel, the summary appears where the command ran', async () => {
+  const bot = await meetingBot({ home: false });
+  await bot.send(summarize());
+  const edit = bot.discord.state.webhooks.at(-1);
+  assert.equal(edit.body.embeds[1].title, '⭐ Important');
+  assert.equal(edit.files[0].name, 'meeting-1-notes.txt');
+  assert.ok((await bot.repo.latestMeeting('g')).thread_id);
+});
+
+test('the same transcript twice is not summarized (or paid for) twice', async () => {
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  await bot.send(summarize());
+  assert.equal(bot.ai.calls.length, 1);
+  assert.match(bot.discord.state.webhooks.at(-1).body.content, /already summarized as meeting #1/);
+});
+
+test('audio files and missing input are turned away before any AI call', async () => {
+  const bot = await meetingBot();
+  const audio = await bot.send(command('meeting', { file: 'a' }, { sub: 'summarize', resolved: { attachments: { a: { ...transcript, filename: 'call.m4a' } } } }));
+  assert.match(audio.data.content, /Audio and video files aren’t supported yet/);
+  const nothing = await bot.send(command('meeting', {}, { sub: 'summarize' }));
+  assert.match(nothing.data.content, /Attach a transcript/);
+  assert.equal(bot.ai.calls.length, 0);
+});
+
+test('without an API key, meeting AI explains itself; listing still works', async () => {
+  const bot = await meetingBot({ ai: null });
+  assert.equal((await bot.send(summarize())).data.content, AI_OFF);
+  assert.equal((await bot.send(click('ask:1'))).data.content, AI_OFF);
+  assert.equal((await bot.send(command('meeting', {}, { sub: 'list' }))).data.content, NO_MEETINGS);
+});
+
+test('Ask a question opens a form; the answer is posted in the meeting’s thread with citations', async () => {
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  const m = await bot.repo.latestMeeting('g');
+
+  const form = await bot.send(click(`ask:${m.id}`));
+  assert.equal(form.response.type, 9, 'a form pops up');
+  assert.equal(form.response.data.custom_id, `askm:${m.id}`);
+  assert.equal(form.response.data.components[0].components[0].custom_id, 'question');
+
+  const sent = await bot.send(submitForm(`askm:${m.id}`, { question: 'When is launch?' }));
+  assert.equal(sent.response.type, 5);
+  assert.equal(sent.response.data.flags, 64, 'the pointer is private');
+  const [, answer] = bot.discord.posts(m.thread_id);
+  assert.equal(answer.content, '**<@u1> asked:** When is launch?\nYou asked: When is launch? [S2 · 1:10]');
+  assert.deepEqual(answer.allowed_mentions, { parse: [] }, 'nobody gets pinged');
+  assert.match(bot.discord.state.webhooks.at(-1).body.content, /Answered in the meeting’s thread/);
+  assert.equal((await bot.repo.recentQuestions(m.id)).length, 1);
+});
+
+test('follow-up questions include recent Q&A, but nothing older than 30 minutes', async () => {
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  const m = await bot.repo.latestMeeting('g');
+  await bot.repo.addQuestion(m.id, 'x', 'Ancient?', 'Old.', Date.now() - 60 * 60 * 1000);
+  await bot.send(submitForm(`askm:${m.id}`, { question: 'When is launch?' }));
+  await bot.send(submitForm(`askm:${m.id}`, { question: 'Why did it move?' }));
+  const sent = bot.ai.calls.at(-1).messages.map((x) => x.content);
+  assert.deepEqual(sent, ['When is launch?', 'You asked: When is launch? [S2 · 1:10]', 'Why did it move?']);
 });
 
 test('a very long question is cut down before it is sent', async () => {
-  const { ai, handlers } = setup();
-  await handlers.onMessage(fakeMessage({ content: `why ${'x'.repeat(3000)}?`, channelId: 'thread1' }));
-  assert.ok(ai.calls[0].messages.at(-1).content.length <= 501);
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  await bot.send(submitForm('askm:1', { question: `why ${'x'.repeat(3000)}?` }));
+  assert.ok(bot.ai.calls.at(-1).messages.at(-1).content.length <= 501);
 });
 
-test('an @mention that is not a question gets a free tip, not an AI call', async () => {
-  const { ai, handlers } = setup();
-  const hi = fakeMessage({ content: '<@42> hi!', mentionsBot: true });
-  await handlers.onMessage(hi);
-  assert.equal(hi.replies[0].content, ASK_HINT);
-  assert.equal(ai.calls.length, 0);
+test('/meeting ask uses the thread’s meeting, or the latest one (and says which)', async () => {
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  const m = await bot.repo.latestMeeting('g');
+  await bot.send(command('meeting', { question: 'When is launch?' }, { sub: 'ask', channel_id: m.thread_id }));
+  assert.equal(bot.discord.state.webhooks.at(-1).body.content, '> When is launch?\nYou asked: When is launch? [S2 · 1:10]');
+  await bot.send(command('meeting', { question: 'Who owns it?' }, { sub: 'ask' }));
+  assert.match(bot.discord.state.webhooks.at(-1).body.content, /^-# About meeting #1: Launch timing\n> Who owns it\?/);
 });
 
-test('summarizing the same transcript twice reuses the first summary', async () => {
-  const repo = openDb();
-  const segments = parseTranscript(VTT);
-  const first = repo.addMeeting({ guild_id: G, title: 'call', source: 'file: call.vtt', raw: VTT, segments, created_by_id: 'u1' });
-  repo.setMeetingSummary(first.id, normalizeSummary(SUMMARY, segments));
-  repo.setMeetingPost(first.id, 'notes-chan', 'msg9', 't9');
+test('when Claude fails, the “thinking…” message turns into a clear error', async () => {
+  const ai = fakeAi(() => { throw new AiError('Claude took too long to answer.'); });
+  const bot = await meetingBot({ ai });
+  await bot.send(summarize());
+  assert.equal(bot.discord.state.webhooks.at(-1).body.content, '⚠️ Claude took too long to answer.');
+});
 
-  let calls = 0;
-  const handlers = createMeetingHandlers({
-    client: { user: { id: '42' }, channels: { fetch: async () => { throw new Error('none'); } } },
-    repo,
-    ai: { async json() { calls += 1; return { data: SUMMARY }; } },
-    fetchText: async () => VTT,
-  });
-  const edits = [];
-  await handlers.command({
-    guildId: G, channelId: 'c', channel: { name: 'general' }, user: { id: 'u1' },
-    options: { getSubcommand: () => 'summarize', getAttachment: () => ({ name: 'call.vtt', url: 'u', size: 10, contentType: 'text/vtt' }), getInteger: () => null, getString: () => null },
-    async deferReply() {},
-    async editReply(p) { edits.push(p); return {}; },
-  });
-  assert.equal(calls, 0, 'no AI call');
-  assert.match(edits[0], /already summarized as meeting #1.*\/notes-chan\/msg9/);
+test('/meeting list and /meeting notes', async () => {
+  const bot = await meetingBot();
+  await bot.send(summarize());
+  assert.match((await bot.send(command('meeting', {}, { sub: 'list' }))).data.content, /🎙️ \*\*#1\*\* Launch timing/);
+  await bot.send(command('meeting', { id: 1 }, { sub: 'notes' }));
+  const edit = bot.discord.state.webhooks.at(-1);
+  assert.match(edit.files[0].data, /\[S1 · 0:01\] Ana:/);
+});
+
+test('hours: summarizes the channel’s recent messages, skipping bots and emoji-only chatter', async () => {
+  const bot = await meetingBot();
+  const t = (min) => new Date(Date.now() - min * 60_000).toISOString();
+  bot.discord.state.messages.set('history:general', [ // newest first, like Discord
+    { id: '4', timestamp: t(1), author: { username: 'ben' }, content: 'Agreed, Dec 8.' },
+    { id: '3', timestamp: t(2), author: { username: 'bot', bot: true }, content: 'beep' },
+    { id: '2', timestamp: t(3), author: { username: 'ana' }, content: '👍' },
+    { id: '1', timestamp: t(4), author: { username: 'ana', global_name: 'Ana' }, content: 'Move launch a week?' },
+    { id: '0', timestamp: t(200), author: { username: 'ana' }, content: 'too old' },
+  ]);
+  await bot.send(command('meeting', { hours: 2 }, { sub: 'summarize' }));
+  const sent = bot.ai.calls[0].messages[0].content;
+  assert.match(sent, /\[S1\] Ana: Move launch a week\?\n\[S2\] ben: Agreed, Dec 8\./);
+  assert.doesNotMatch(sent, /beep|👍|too old/);
 });

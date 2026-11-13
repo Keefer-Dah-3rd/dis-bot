@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Discord bot that collects and organizes the Mibbit team's notes.",
+  "description": "Discord bot that collects and organizes the Mibbit team's notes. Runs on demand on Supabase.",
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.js",
     "test": "node --test test/*.test.js",
+    "deploy": "node --env-file-if-exists=.env scripts/deploy.js",
     "try-meeting": "node --env-file-if-exists=.env scripts/try-meeting.js",
     "token-report": "node scripts/token-report.js"
   },
@@ -15,7 +15,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
-    "better-sqlite3": "^13.1.1",
-    "discord.js": "^14.28.1"
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "supabase": "^3.1.0"
   }
 }

@@ -8,10 +8,9 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createAi } from '../src/ai.js';
-import { openDb } from '../src/db.js';
-import { answerQuestion, normalizeSummary, summarizeMeeting } from '../src/meetings.js';
-import { label, parseTranscript } from '../src/transcript.js';
+import { createAi } from '../supabase/functions/_shared/ai.js';
+import { answerQuestion, normalizeSummary, summarizeMeeting } from '../supabase/functions/_shared/meetings.js';
+import { label, parseTranscript } from '../supabase/functions/_shared/transcript.js';
 
 const [fileArg, ...questionArgs] = process.argv.slice(2);
 const file = fileArg ?? fileURLToPath(new URL('../samples/sample-meeting.vtt', import.meta.url));
@@ -19,7 +18,7 @@ const questions = questionArgs.length
   ? questionArgs
   : ['What changed in this meeting, and who owns what?', 'What is the marketing budget?'];
 
-const ai = createAi();
+const ai = createAi({ apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.ANTHROPIC_MODEL });
 if (!ai) {
   console.error('\nAI is off: paste your Anthropic API key after ANTHROPIC_API_KEY= in .env, then run this again.\n');
   process.exit(1);
@@ -59,14 +58,11 @@ if (summary.open_questions.length) {
 console.log(dim(`\n(summary took ${((Date.now() - started) / 1000).toFixed(1)}s)`));
 
 // Questions, the same way the bot answers them in a meeting's thread.
-const repo = openDb();
-const meeting = repo.addMeeting({ guild_id: 'terminal', title: summary.title, source: `file: ${basename(file)}`, raw, segments, created_by_id: 'you' });
-repo.setMeetingSummary(meeting.id, summary);
-const stored = repo.getMeeting('terminal', meeting.id);
+const meeting = { id: 1, title: summary.title, source: `file: ${basename(file)}`, segments, summary };
+const history = [];
 for (const q of questions) {
-  const history = repo.recentQuestions(meeting.id, 4);
-  const { text, covered } = await answerQuestion(ai, stored, history, q);
-  repo.addQuestion(meeting.id, 'you', q, text);
+  const { text, covered } = await answerQuestion(ai, meeting, history.slice(-3), q);
+  history.push({ question: q, answer: text });
   console.log(`\n${bold(`❔ ${q}`)}\n   ${text}${covered ? '' : dim('  [not covered by the notes]')}`);
 }
 

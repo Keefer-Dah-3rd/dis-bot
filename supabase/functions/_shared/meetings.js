@@ -1,4 +1,4 @@
-import { EmbedBuilder } from 'discord.js';
+import { button, row } from './interaction.js';
 import { renderSegments, renderForModel, label } from './transcript.js';
 import { fitLines, snippet } from './format.js';
 
@@ -120,33 +120,33 @@ export function renderSummary(meeting, summary) {
     })
     : ['No changes to earlier plans or decisions.'];
 
-  const header = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle(`🎙️ ${snippet(summary.title, 200)}`)
-    .setDescription(fitLines([
-      summary.overview,
-      '',
-      `Meeting #${meeting.id} · ${seg.length} segments · ${snippet(meeting.source, 80)}`,
-      'Ask me about it in the thread below (or @mention me). Tags like `S12` point to the full notes attached.',
-    ], 700))
-    .setTimestamp(meeting.created_at);
-
+  const embed = (color, title, description) => ({ color, title, description });
   const embeds = [
-    header,
-    new EmbedBuilder().setColor(0xfacc15).setTitle(SECTION_TITLES.important).setDescription(fitLines(important, 2700)),
-    new EmbedBuilder().setColor(0x3b82f6).setTitle(SECTION_TITLES.changes).setDescription(fitLines(changes, 1500)),
+    {
+      ...embed(0x5865f2, `🎙️ ${snippet(summary.title, 200)}`, fitLines([
+        summary.overview,
+        '',
+        `Meeting #${meeting.id} · ${seg.length} segments · ${snippet(meeting.source, 80)}`,
+        'Press **Ask a question** below to ask me about it. Tags like `S12` point to the full notes attached.',
+      ], 700)),
+      timestamp: new Date(meeting.created_at).toISOString(),
+    },
+    embed(0xfacc15, SECTION_TITLES.important, fitLines(important, 2700)),
+    embed(0x3b82f6, SECTION_TITLES.changes, fitLines(changes, 1500)),
   ];
   if (summary.open_questions.length) {
-    embeds.push(new EmbedBuilder().setColor(0x9ca3af).setTitle(SECTION_TITLES.open)
-      .setDescription(fitLines(summary.open_questions.map((q) => `• ${q.text}${refTags(q.refs, seg)}`), 800)));
+    embeds.push(embed(0x9ca3af, SECTION_TITLES.open, fitLines(summary.open_questions.map((q) => `• ${q.text}${refTags(q.refs, seg)}`), 800)));
   }
-  return { embeds };
+  return { embeds, components: [askRow(meeting.id)] };
 }
+
+// The button under every summary: opens a small form to ask about the meeting.
+export const askRow = (meetingId) => row(button({ customId: `ask:${meetingId}`, label: 'Ask a question', emoji: '❔' }));
 
 // The full numbered notes, as a downloadable file.
 export function notesFile(meeting) {
   const head = `Meeting #${meeting.id}: ${meeting.title}\nSource: ${meeting.source}\n\n`;
-  return Buffer.from(head + renderSegments(meeting.segments), 'utf8');
+  return head + renderSegments(meeting.segments);
 }
 
 // ---------- questions ----------
