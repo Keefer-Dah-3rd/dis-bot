@@ -20,6 +20,7 @@ const MAX_QUESTION_CHARS = 500;
 
 export const AI_OFF = 'Meeting summaries and questions use AI, which isn’t switched on for this bot yet. It turns on once an Anthropic API key is added to the bot’s settings (see “Meeting notes” in the README).';
 export const NO_MEETINGS = 'There are no meeting summaries yet. Make one with `/meeting summarize`.';
+export const NO_HOME = 'There’s no meeting-notes channel yet. Run `/setup` in Discord first.';
 export const THREAD_INTRO = 'Questions and answers about this meeting collect here. Press **Ask a question** on the summary, or type `/meeting ask` in this thread.';
 
 async function defaultFetchText(url) {
@@ -91,57 +92,87 @@ export function createMeetingHandlers({ repo, discord, ai, fetchText = defaultFe
         raw = renderSegments(segments);
         source = `#${c.channel?.name ?? 'channel'}, last ${hours}h`;
       }
-      if (!segments.length) return { content: 'I couldn’t find any text to summarize.' };
-      if (renderSegments(segments).length > MAX_NOTES_CHARS) {
-        return { content: 'Those notes are too long for one summary. Split the meeting into parts and summarize each.' };
-      }
-
-      // The same transcript twice? Point to the summary we already paid for.
-      const already = await repo.findMeetingByRaw(c.guildId, raw);
-      if (already?.message_id) {
-        return { content: `🎙️ That was already summarized as meeting #${already.id}, **${snippet(already.title, 80)}**: ${messageUrl(c.guildId, already.channel_id, already.message_id)}` };
-      }
-
-      const fallbackTitle = givenTitle ?? (file ? file.filename.replace(/\.[^.]+$/, '') : `#${c.channel?.name ?? 'channel'} discussion`);
-      const meeting = await repo.addMeeting({ guild_id: c.guildId, title: fallbackTitle, source, raw, segments, created_by_id: c.userId });
-      const summary = await summarizeMeeting(ai, { title: givenTitle ?? '', segments, earlierDecisions: await repo.recentDecisions(c.guildId, 15) });
-      if (givenTitle) summary.title = givenTitle;
-      await repo.setMeetingSummary(meeting.id, summary);
-      const stored = await repo.getMeeting(c.guildId, meeting.id);
-
-      const post = { ...renderSummary(stored, summary), allowed_mentions: { parse: [] } };
-      const files = [{ name: `meeting-${meeting.id}-notes.txt`, data: notesFile(stored) }];
-
-      // Summaries live in the meeting-notes channel; if the command ran somewhere
-      // else, post there and leave a pointer here.
-      const homeId = await repo.getSetting(c.guildId, 'meetings_channel');
-      let msg = null;
-      let pointer = null;
-      if (homeId && homeId !== c.channelId) {
-        msg = await discord.send(homeId, post, files).catch(() => null);
-        if (msg) pointer = { content: `🎙️ Meeting notes for **${snippet(summary.title, 80)}** are in <#${homeId}>: ${messageUrl(c.guildId, homeId, msg.id)}` };
-      }
-      if (!msg) msg = await discord.editOriginal(c.token, post, files);
-
-      let thread = null;
-      try {
-        thread = await discord.startThread(msg.channel_id, msg.id, { name: snippet(`💬 ${summary.title}`, 100), auto_archive_duration: 10080 });
-        await discord.send(thread.id, { content: THREAD_INTRO });
-      } catch {
-        thread = null; // e.g. the command ran inside a thread, where threads can't nest
-      }
-      await repo.setMeetingPost(meeting.id, msg.channel_id, msg.id, thread?.id ?? null);
-
-      // Decisions from the meeting go into the decision log too.
-      for (const d of summary.important.decisions) {
-        const note = await repo.addNote({
-          guild_id: c.guildId, tag: 'decision', content: d.text, why: d.why || null,
-          author_id: c.userId, source_url: messageUrl(c.guildId, msg.channel_id, msg.id),
-        });
-        await fileNote(discord, repo, c.guildId, note.id).catch(() => {});
-      }
-      return pointer; // null when the summary itself replaced the "thinking…" message
+      const out = await publish({
+        guildId: c.guildId, userId: c.userId, raw, segments, source, givenTitle,
+        fallbackTitle: givenTitle ?? (file ? file.filename.replace(/\.[^.]+$/, '') : `#${c.channel?.name ?? 'channel'} discussion`),
+        here: { channelId: c.channelId, token: c.token },
+      });
+      if (out.problem) return { content: out.problem };
+      if (out.already) return { content: `🎙️ That was already summarized as meeting #${out.already.id}, **${snippet(out.already.title, 80)}**: ${out.url}` };
+      // null when the summary itself replaced the "thinking…" message
+      return out.moved ? { content: `🎙️ Meeting notes for **${snippet(out.summary.title, 80)}** are in <#${out.msg.channel_id}>: ${out.url}` } : null;
     });
+  }
+
+  // Summarizes one meeting's notes and posts the result. Used by /meeting
+  // summarize (`here` is the command waiting for its answer) and by transcripts
+  // sent in from the meeting recorder (no `here`: it goes to #meeting-notes).
+  async function publish({ guildId, userId, raw, segments, source, givenTitle, fallbackTitle, here = null }) {
+    if (!segments.length) return { problem: 'I couldn’t find any text to summarize.' };
+    if (renderSegments(segments).length > MAX_NOTES_CHARS) {
+      return { problem: 'Those notes are too long for one summary. Split the meeting into parts and summarize each.' };
+    }
+
+    // The same transcript twice? Point to the summary we already paid for.
+    const already = await repo.findMeetingByRaw(guildId, raw);
+    if (already?.message_id) return { already, url: messageUrl(guildId, already.channel_id, already.message_id) };
+
+    const homeId = await repo.getSetting(guildId, 'meetings_channel');
+    if (!here && !homeId) return { problem: NO_HOME };
+
+    const meeting = await repo.addMeeting({ guild_id: guildId, title: fallbackTitle, source, raw, segments, created_by_id: userId });
+    const summary = await summarizeMeeting(ai, { title: givenTitle ?? '', segments, earlierDecisions: await repo.recentDecisions(guildId, 15) });
+    if (givenTitle) summary.title = givenTitle;
+    await repo.setMeetingSummary(meeting.id, summary);
+    const stored = await repo.getMeeting(guildId, meeting.id);
+
+    const post = { ...renderSummary(stored, summary), allowed_mentions: { parse: [] } };
+    const files = [{ name: `meeting-${meeting.id}-notes.txt`, data: notesFile(stored) }];
+
+    // Summaries live in the meeting-notes channel; if a command ran somewhere
+    // else, post there and leave a pointer where it ran.
+    let msg = null;
+    let moved = false;
+    if (homeId && homeId !== here?.channelId) {
+      msg = here ? await discord.send(homeId, post, files).catch(() => null) : await discord.send(homeId, post, files);
+      moved = Boolean(msg);
+    }
+    if (!msg) msg = await discord.editOriginal(here.token, post, files);
+
+    let thread = null;
+    try {
+      thread = await discord.startThread(msg.channel_id, msg.id, { name: snippet(`💬 ${summary.title}`, 100), auto_archive_duration: 10080 });
+      await discord.send(thread.id, { content: THREAD_INTRO });
+    } catch {
+      thread = null; // e.g. the command ran inside a thread, where threads can't nest
+    }
+    await repo.setMeetingPost(meeting.id, msg.channel_id, msg.id, thread?.id ?? null);
+
+    // Decisions from the meeting go into the decision log too.
+    for (const d of summary.important.decisions) {
+      const note = await repo.addNote({
+        guild_id: guildId, tag: 'decision', content: d.text, why: d.why || null,
+        author_id: userId, source_url: messageUrl(guildId, msg.channel_id, msg.id),
+      });
+      await fileNote(discord, repo, guildId, note.id).catch(() => {});
+    }
+    return { meeting: stored, summary, msg, moved, url: messageUrl(guildId, msg.channel_id, msg.id) };
+  }
+
+  // A transcript sent in by the meeting recorder (see recorder/ and
+  // scripts/post-meeting.js) rather than uploaded with a command.
+  async function ingest({ guildId, userId, transcript, title, source }) {
+    if (!ai) return { ok: false, error: AI_OFF };
+    const raw = String(transcript ?? '').trim();
+    const givenTitle = String(title ?? '').trim() || null;
+    const out = await publish({
+      guildId, userId, raw, segments: parseTranscript(raw), givenTitle,
+      source: String(source ?? '').trim() || 'recorded call',
+      fallbackTitle: givenTitle ?? 'Recorded meeting',
+    });
+    if (out.problem) return { ok: false, error: out.problem };
+    if (out.already) return { ok: true, already: true, meeting_id: out.already.id, title: out.already.title, url: out.url };
+    return { ok: true, already: false, meeting_id: out.meeting.id, title: out.summary.title, url: out.url };
   }
 
   async function askCommand(c) {
@@ -174,6 +205,8 @@ export function createMeetingHandlers({ repo, discord, ai, fetchText = defaultFe
   }
 
   return {
+    ingest,
+
     commands: {
       async meeting(c) {
         if (c.sub === 'list') return list(c);

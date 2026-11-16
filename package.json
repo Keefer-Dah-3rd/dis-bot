@@ -8,6 +8,7 @@
     "test": "node --test test/*.test.js",
     "deploy": "node --env-file-if-exists=.env scripts/deploy.js",
     "try-meeting": "node --env-file-if-exists=.env scripts/try-meeting.js",
+    "post-meeting": "node --env-file-if-exists=.env scripts/post-meeting.js",
     "token-report": "node scripts/token-report.js"
   },
   "engines": {

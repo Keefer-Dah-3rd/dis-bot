@@ -295,13 +295,13 @@ const summarize = (options = {}, extra = {}) =>
   command('meeting', { file: 'att1', ...options }, { sub: 'summarize', resolved: { attachments: { att1: transcript } }, ...extra });
 const answerEcho = (req) => ({ answer: `You asked: ${req.messages.at(-1).content} [S2]`, covered: true, refs: [2] });
 
-async function meetingBot({ ai = fakeAi(SUMMARY, answerEcho), home = true } = {}) {
+async function meetingBot({ ai = fakeAi(SUMMARY, answerEcho), home = true, env } = {}) {
   const discord = fakeDiscord({ channels: [
     { id: 'forum', type: CHANNEL.FORUM, name: 'notes' },
     { id: 'meeting-notes', type: CHANNEL.TEXT, name: 'meeting-notes' },
     { id: 'general', type: CHANNEL.TEXT, name: 'general' },
   ] });
-  const bot = await makeBot({ ai, discord, fetchText: async () => VTT });
+  const bot = await makeBot({ ai, discord, env, fetchText: async () => VTT });
   await bot.repo.setSetting('g', 'notes_forum', 'forum');
   if (home) await bot.repo.setSetting('g', 'meetings_channel', 'meeting-notes');
   return bot;
@@ -443,4 +443,70 @@ test('hours: summarizes the channel’s recent messages, skipping bots and emoji
   const sent = bot.ai.calls[0].messages[0].content;
   assert.match(sent, /\[S1\] Ana: Move launch a week\?\n\[S2\] ben: Agreed, Dec 8\./);
   assert.doesNotMatch(sent, /beep|👍|too old/);
+});
+
+// ---------- transcripts sent in by the meeting recorder ----------
+const RECORDED = '[00:00:00] Ana: Launch moves to December 8.\n[00:00:07] Ben: Agreed. I will update the checklist.';
+const ingest = (bot, body, secret = 's3cret') => bot.app.handle(new Request('https://bot.test/functions/v1/discord-bot/ingest', {
+  method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body), headers: { 'x-cron-secret': secret },
+}));
+
+test('a recorded call’s transcript is summarized and posted in #meeting-notes', async () => {
+  const bot = await meetingBot({ env: { CRON_SECRET: 's3cret' } });
+  const res = await ingest(bot, { transcript: RECORDED, title: 'Monday sync', source: 'recorded call, 2 min' });
+  assert.equal(res.status, 200);
+  const out = await res.json();
+
+  const [post] = bot.discord.posts('meeting-notes');
+  assert.deepEqual(out, { ok: true, already: false, meeting_id: 1, title: 'Monday sync', url: `https://discord.com/channels/g/meeting-notes/${post.id}` });
+  assert.equal(post.embeds[0].title, '🎙️ Monday sync');
+  assert.equal(post.components[0].components[0].custom_id, 'ask:1');
+  assert.match(post.files[0].data, /\[S1 · 0:00\] Ana: Launch moves to December 8\./);
+
+  const m = await bot.repo.latestMeeting('g');
+  assert.equal(m.source, 'recorded call, 2 min');
+  assert.ok(m.thread_id, 'questions get a thread, like any other summary');
+  const [decision] = await bot.repo.recentDecisions('g');
+  assert.equal(decision.author_id, 'app', 'decisions from a recording are credited to the bot');
+});
+
+test('sending the same recording twice does not summarize (or pay) twice', async () => {
+  const bot = await meetingBot({ env: { CRON_SECRET: 's3cret' } });
+  const first = await (await ingest(bot, { transcript: RECORDED })).json();
+  const again = await (await ingest(bot, { transcript: RECORDED })).json();
+  assert.equal(bot.ai.calls.length, 1);
+  assert.deepEqual([again.already, again.url], [true, first.url]);
+});
+
+test('transcripts are only accepted with the secret, and need real text', async () => {
+  const bot = await meetingBot({ env: { CRON_SECRET: 's3cret' } });
+  assert.equal((await ingest(bot, { transcript: RECORDED }, 'wrong')).status, 401);
+  assert.equal((await ingest(bot, { transcript: '   ' })).status, 400);
+  assert.equal((await ingest(bot, 'not json')).status, 400);
+  assert.equal(bot.ai.calls.length, 0);
+  assert.equal(bot.discord.posts('meeting-notes').length, 0);
+
+  const noSecret = await meetingBot();
+  assert.equal((await ingest(noSecret, { transcript: RECORDED }, undefined)).status, 401, 'no secret set means nothing gets in');
+});
+
+test('a recording needs a meeting-notes channel and AI; both say so without spending anything', async () => {
+  const homeless = await meetingBot({ home: false, env: { CRON_SECRET: 's3cret' } });
+  const res = await ingest(homeless, { transcript: RECORDED });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /Run `\/setup`/);
+  assert.equal(homeless.ai.calls.length, 0);
+
+  const noAi = await meetingBot({ ai: null, env: { CRON_SECRET: 's3cret' } });
+  const off = await ingest(noAi, { transcript: RECORDED });
+  assert.equal(off.status, 422);
+  assert.match((await off.json()).error, /isn’t switched on/);
+});
+
+test('when Claude fails on a recording, the sender gets a clear error', async () => {
+  const bot = await meetingBot({ env: { CRON_SECRET: 's3cret' }, ai: { model: 'fake', usageLog: [], calls: [], async json() { throw new AiError('Claude took too long. Try again.'); } } });
+  const res = await ingest(bot, { transcript: RECORDED });
+  assert.equal(res.status, 502);
+  assert.equal((await res.json()).error, '⚠️ Claude took too long. Try again.');
+  assert.equal(bot.discord.posts('meeting-notes').length, 0);
 });

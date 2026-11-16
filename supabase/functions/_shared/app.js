@@ -1,12 +1,13 @@
 // The bot's front door. Supabase wakes it for each request:
 //   POST /discord-bot        → a Discord interaction (command, button, menu, form)
 //   POST /discord-bot/cron   → the timer (Monday digest + daily check-in)
+//   POST /discord-bot/ingest → a transcript from the meeting recorder, to summarize and post
 //   GET  /discord-bot        → "is it up?"
 import { AiError } from './ai.js';
 import { buildDigest, digestSlot } from './digest.js';
 import { DiscordError } from './discord-api.js';
 import { readInteraction, reply, RESPONSE, TYPE, verifySignature } from './interaction.js';
-import { createMeetingHandlers } from './meeting-handlers.js';
+import { createMeetingHandlers, NO_HOME } from './meeting-handlers.js';
 import { createNotesHandlers, digestEmbed, digestSettings } from './notes-handlers.js';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -112,12 +113,37 @@ export function createApp({ env, repo, discord, ai, schedule, fetchText, waitUnt
     return json({ ok: true, slot, posted: posted.length });
   }
 
+  // A recorded call's transcript, sent from the team's own computer with the
+  // same secret the timer uses. Answers once the summary is posted (or says why not).
+  async function ingest(request) {
+    if (!env.CRON_SECRET || request.headers.get('x-cron-secret') !== env.CRON_SECRET) return new Response('unauthorized', { status: 401 });
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+    if (typeof body?.transcript !== 'string' || !body.transcript.trim()) return json({ ok: false, error: 'Send JSON with a "transcript".' }, 400);
+
+    const guilds = await repo.guildsWithSetting('meetings_channel');
+    const guildId = body.guild_id ?? guilds[0];
+    if (!guildId || !guilds.includes(guildId)) return json({ ok: false, error: NO_HOME }, 409);
+    try {
+      const out = await meetings.ingest({ guildId, userId: discord.appId, transcript: body.transcript, title: body.title, source: body.source });
+      return json(out, out.ok ? 200 : 422);
+    } catch (err) {
+      if (!(err instanceof AiError)) log.error('ingest failed:', err);
+      return json({ ok: false, error: errorText(err) }, 502);
+    }
+  }
+
   return {
     async handle(request) {
       const { pathname } = new URL(request.url);
       if (request.method === 'GET') return new Response('Mibbit Notes is ready.');
       if (request.method !== 'POST') return new Response('method not allowed', { status: 405 });
       if (pathname.endsWith('/cron')) return cron(request);
+      if (pathname.endsWith('/ingest')) return ingest(request);
       return interaction(request);
     },
   };
